@@ -1,39 +1,53 @@
 # Swing Screener (Streamlit) — Phase 1
 
 Mobile-first swing-trade screener. Pick a strategy, tap **Run**, get the top 10 long setups with entry trigger,
-structure + ATR stops, 2R level, sector context and earnings check. Nothing runs until you tap Run.
+structure + ATR stops, R target, hold period / time stop, sector context and earnings check. Nothing runs until you tap Run.
 
 ## What's in phase 1
-- Universe: S&P 500 + Nasdaq-100 (live lists from Wikipedia, bundled fallback if unavailable)
-- Screeners: Breakout · Pullback · Oversold bounce · Momentum (each in its own file)
-- Shared pipeline: earnings ≤7d excluded, top 10 by score, SPY/50-SMA regime warning, breadth, VIX, sector state
+- Universe: S&P 500 + Nasdaq-100 by default; Quality dip adds the Russell 1000 (iShares IWB holdings,
+  falling back to S&P 500 + S&P 400 if that file can't be read). Set `universe = [...]` in any strategy file.
+- Screeners: Breakout · Pullback · Oversold bounce · Momentum · Quality dip (each in its own file)
+- Per-strategy trade plan: hold period, time stop, R target and ATR-stop multiple
+- Screening Definitions tab, generated from the strategy files (rules, score, trigger, market fit, glossary)
+- Shared pipeline: earnings ≤7d excluded (later reports inside the hold move the time stop), top 10 by score, SPY/50-SMA regime warning, breadth, VIX, sector state
 - Live mode during market hours: today's partial bar + volume projected to a full day
 - Data freshness stamp on every result (and a stale-data warning)
-- Google Sheets log of every run + automatic 5-day outcome scoring (Tracker tab)
+- Google Sheets log of every run + outcome scoring over each strategy's hold (logging currently off) (Tracker tab)
 
 ## Layout
 ```
-app.py                  UI (Screen / Tracker / Status tabs)
+app.py                  UI (Screen / Screening Definitions / Tracker / Status tabs)
 core/
   settings.py           defaults (top N, earnings window, ATR stop multiple, …)
   data.py               data providers: Yahoo (no key) → Alpaca (when keys are set)
-  universe.py           ticker lists — add new universes here
+  universe.py           ticker lists (sp500, ndx100, sp400, russell1000) — add new universes here
   indicators.py         shared indicators (add a column once, every strategy can use it)
   context.py            regime, breadth, VIX, sector strength, relative-strength percentiles
   strategy.py           Strategy template + auto-discovery
   pipeline.py           rank → earnings filter → top N → card fields
   earnings.py           Finnhub calendar (key) or Yahoo fallback
+  fundamentals.py       Yahoo fundamentals (+ Finnhub ROI), fetched only for prefilter survivors
   storage.py            Google Sheets log
-  outcomes.py           5-day outcome scoring
+  outcomes.py           outcome scoring (per-strategy hold & target)
 strategies/             ONE FILE PER SCREENER (auto-loaded)
   _template.py          copy this to add a screener
 tests/                  synthetic-data tests (pytest)
 ```
 
 ## Add / remove a screener
-- **Add:** copy `strategies/_template.py` → `strategies/my_setup.py`, edit `key`, `name`, `params`, `evaluate()`.
+- **Add:** copy `strategies/_template.py` → `strategies/my_setup.py`; edit `key`, `name`, `params`, `hold`,
+  `target_r`, `atr_stop_mult`, the `rules`/`score_parts` text and `evaluate()`.
 - **Remove:** delete the file, or set `enabled = False`.
-- **Tune:** edit the `params` dict at the top of the strategy file.
+- **Tune:** edit the `params` dict at the top of the strategy file (the Definitions tab updates itself; bump `changed`).
+
+| Strategy | Hold (trading days) | Target | ATR stop |
+|---|---|---|---|
+| Oversold bounce | 2–5 | 1.5R | 1.5× |
+| Pullback | 3–10 | 2R | 1.5× |
+| Breakout | 5–15 | 2.5R | 1.5× |
+| Momentum | 5–20 | 3R | 2× |
+| Quality dip | 10–30 | 3R | 2× |
+
 No other file changes. Keep `key` stable once you start logging (the Tracker groups by it).
 
 ## Deploy (Streamlit Community Cloud)

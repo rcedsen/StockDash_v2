@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from core import context as cctx
-from core import earnings, outcomes, pipeline
+from core import earnings, fundamentals, outcomes, pipeline
 from core.data import ET, get_provider, market_open, now_et
 from core.settings import SECTOR_ETF, get_settings, secret
 from core.storage import SheetLog
@@ -29,6 +29,8 @@ st.markdown("""
 .pill {display:inline-block; padding: 0 .45rem; border-radius: 999px; font-size: .75rem;
        border: 1px solid rgba(128,128,128,.35); margin-left: .25rem;}
 .up {color: #16a34a;} .dn {color: #dc2626;}
+.tag-ready {background: rgba(34,197,94,.18); border-color: rgba(34,197,94,.6);}
+.def-h {font-weight: 700; margin: .6rem 0 .1rem 0; font-size: .92rem;}
 </style>""", unsafe_allow_html=True)
 
 S = get_settings()
@@ -64,8 +66,26 @@ def c_vix():
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def c_earnings(symbols: tuple, today: dt.date, window: int):
-    return earnings.next_earnings(list(symbols), today, window, secret("FINNHUB_API_KEY"))
+def c_earnings(symbols: tuple, today: dt.date, horizon: int):
+    return earnings.next_earnings(list(symbols), today, horizon, secret("FINNHUB_API_KEY"))
+
+
+FUND_TTL = 7 * 86400
+
+
+@st.cache_resource
+def fund_store() -> dict:
+    """{symbol: (fetched_epoch, metrics)} shared by all sessions until the app restarts."""
+    return {}
+
+
+def get_fundamentals(symbols: list[str]) -> dict:
+    store, now = fund_store(), time.time()
+    need = [s for s in symbols if s not in store or now - store[s][0] > FUND_TTL]
+    if need:
+        for s, v in fundamentals.fetch_many(need, secret("FINNHUB_API_KEY")).items():
+            store[s] = (now, v)
+    return {s: store[s][1] for s in symbols if s in store}
 
 
 def expected_session(t: dt.datetime) -> dt.date:
@@ -79,16 +99,21 @@ def expected_session(t: dt.datetime) -> dt.date:
     return d
 
 
-def load_market():
-    """Returns a dict with frames, context and data stamps. Reused across strategies for 60 s."""
+def uni_key(strategy) -> tuple:
+    return tuple(strategy.universe or S["universe"])
+
+
+def load_market(names: tuple):
+    """Frames, context and data stamps for one universe. Reused across strategies for 60 s."""
     t = now_et()
-    uni, uni_note = c_universe(tuple(S["universe"]))
+    uni, uni_note = c_universe(names)
     syms = tuple(sorted(set(uni.symbol) | set(EXTRA)))
     start = t.date() - dt.timedelta(days=S["history_days"])
     hist = c_history(PROVIDER.name, syms, start, t.date())
     today_bars, px_asof, vol_asof = c_today(PROVIDER.name, syms, t.strftime("%Y%m%d%H%M"))
     key = (PROVIDER.name, len(hist), str(px_asof)[:16], t.date())
-    cache = st.session_state.get("market")
+    markets = st.session_state.setdefault("markets", {})
+    cache = markets.get(names)
     if cache and cache["key"] == key:
         return cache
     live = market_open(t) and bool(today_bars)
@@ -109,8 +134,8 @@ def load_market():
     else:
         mode = f"Close of {last_bar:%a %b %d}" if last_bar else "No data"
     m = dict(key=key, frames=frames, ctx=ctx, universe=uni, uni_note=uni_note, mode=mode, live=live,
-             last_bar=last_bar, loaded=t, missing=len(set(uni.symbol) - set(frames)))
-    st.session_state["market"] = m
+             last_bar=last_bar, loaded=t, missing=len(set(uni.symbol) - set(frames)), names=names)
+    markets[names] = m
     return m
 
 
@@ -127,23 +152,27 @@ def pct(x):
 
 def render_card(r: dict):
     earn = r["earnings"]
-    if earn:
+    if earn and r["earn_in_hold"]:
+        earn_txt = f"⚠ {earn:%b %d} — inside the hold, time stop moved before it"
+    elif earn:
         earn_txt = f"{earn:%b %d}"
     elif r["earnings_status"] == "clear":
-        earn_txt = f"none within {S['earnings_window_days']}d"
+        earn_txt = "none inside the hold"
     else:
         earn_txt = "unknown — check before entry"
     sector_pill = f'<span class="pill">{r["sector_etf"]} {r["sector_state"]}</span>' if r["sector_etf"] else ""
+    tag_pills = "".join(f'<span class="pill {"tag-ready" if t == "Ready" else ""}">{t}</span>' for t in r["tags"])
     with st.container(border=True):
         st.markdown(
-            f'<p class="card-h">{r["rank"]} · {r["symbol"]} <span class="pill">score {r["score"]:.0f}</span></p>'
+            f'<p class="card-h">{r["rank"]} · {r["symbol"]} <span class="pill">score {r["score"]:.0f}</span>{tag_pills}</p>'
             f'<p class="card-sub">{r["name"]} · ${fmt(r["price"])} {pct(r["chg1"])} {sector_pill}</p>'
             f'<p class="kv">Entry <b>{fmt(r["entry"])}</b> · {r["entry_note"]}</p>'
             f'<p class="kv">Stop <b>{fmt(r["stop_structure"])}</b> structure (−{fmt(r["risk_struct_pct"], 1)}%)'
-            f' · <b>{fmt(r["stop_atr"])}</b> {S["atr_stop_mult"]}×ATR (−{fmt(r["risk_atr_pct"], 1)}%)</p>'
-            f'<p class="kv">2R <b>{fmt(r["target_2r"])}</b>'
+            f' · <b>{fmt(r["stop_atr"])}</b> {r["atr_mult"]:g}×ATR (−{fmt(r["risk_atr_pct"], 1)}%)</p>'
+            f'<p class="kv">Target <b>{fmt(r["target"])}</b> ({r["target_r"]:g}R)'
             + (f' · {r["target_note"]} <b>{fmt(r["target_hint"])}</b>' if r["target_hint"] else "")
-            + f'</p><p class="kv">Earnings: {earn_txt}</p>',
+            + f'</p><p class="kv">Hold {r["hold_min"]}–{r["hold_max"]} days · time stop <b>{r["time_stop"]:%a %b %d}</b></p>'
+            f'<p class="kv">Earnings: {earn_txt}</p>',
             unsafe_allow_html=True)
         with st.expander("Why it qualified"):
             for n in r["notes"]:
@@ -180,6 +209,99 @@ def render_context(m, strategy):
             st.warning(w)
 
 
+GLOSSARY = {
+    "ATR(14)": "Average True Range over 14 sessions (Wilder smoothing) — the stock's typical daily move. "
+               "Stops, base width and stretch are measured in ATRs so they scale with volatility.",
+    "SMA / EMA": "Simple / exponential moving average of daily closes (10, 20, 50, 200 sessions).",
+    "RSI(2) / RSI(14)": "Wilder RSI over 2 or 14 sessions. RSI(2) < 10 = short-term washed out.",
+    "RS percentile": "Rank of (50% × 1-month + 50% × 3-month return minus SPY's) across the universe; "
+                     "90 = stronger than 90% of the universe.",
+    "Base width": "High–low range of the 20 sessions before today, in ATRs. Smaller = tighter base.",
+    "Projected volume": "During market hours, today's volume so far ÷ the typical share of a day's volume "
+                        "traded by this time, so it can be compared with the 50-day average.",
+    "R": "Risk unit = entry − structure stop. 2R target = entry + 2 × that distance.",
+    "Time stop": "Exit date if neither stop nor target has hit: the strategy's max hold in trading days, "
+                 "moved to the session before earnings when a report falls inside the hold.",
+    "Breadth": "% of the universe closing above its 50-day SMA.",
+    "Sector state": "Leading = sector ETF above its 20 & 50 SMA and beating SPY over 1 month; "
+                    "Lagging = below its 50 SMA and trailing SPY; otherwise Neutral.",
+    "PEG": "Forward P/E ÷ forward EPS growth (in %). Below 1.5 = cheap for its growth.",
+    "FCF yield / margin": "Trailing free cash flow ÷ market cap / ÷ revenue.",
+}
+
+CARD_LEGEND = [
+    "**Header** — rank, ticker, score (0–100, ranking only), badges such as Ready / Setting up",
+    "**Sub-line** — name, last price, today's % change, sector ETF and its state",
+    "**Entry** — the trigger price and how to use it (usually a buy-stop above today's high)",
+    "**Stop** — structure stop and ATR stop, each with % risk from entry; use whichever fits your sizing",
+    "**Target** — the strategy's R-multiple target, plus a chart objective when the strategy has one",
+    "**Hold / time stop** — the strategy's expected hold and the latest exit date",
+    "**Earnings** — next report date; ⚠ when it falls inside the hold",
+    "**Why it qualified** — the values behind each rule and score component",
+]
+
+
+def render_definitions(strats):
+    st.caption("Generated from the strategy files — when a parameter changes, this page changes with it.")
+    st.markdown("**At a glance**")
+    st.dataframe(pd.DataFrame([dict(Strategy=s.name, Hold=f"{s.hold[0]}–{s.hold[1]}d", Target=f"{s.target_r:g}R",
+                                    **{"ATR stop": f"{s.atr_stop_mult:g}×"},
+                                    Regime="warn" if s.regime_sensitive else "info",
+                                    Universe="R1000" if "russell1000" in (s.universe or S["universe"]) else "S&P+NDX",
+                                    Data="price + fund." if "fundamentals" in s.needs else "price")
+                               for s in strats]), hide_index=True, width="stretch")
+    for s in strats:
+        d = s.describe()
+        with st.expander(f"{d['name']} · {d['hold'][0]}–{d['hold'][1]} days"):
+            st.markdown(f"{d['description']}")
+            st.markdown('<p class="def-h">Timeframe & plan</p>', unsafe_allow_html=True)
+            excl = d["earnings_exclude_days"] or S["earnings_window_days"]
+            st.markdown(
+                f"- Universe: {' + '.join(d['universe'] or S['universe'])}\n"
+                f"- Timeframe: {d['timeframe']}\n- Hold: {d['hold'][0]}–{d['hold'][1]} trading days "
+                f"(time stop at {d['hold'][1]})\n- Target: {d['target_r']:g}R\n"
+                f"- Stops: structure — {s.stop_rule or 'see card'}; ATR — entry − {d['atr_stop_mult']:g} × ATR(14)\n"
+                f"- Earnings: excluded if reporting within {excl} days; later reports inside the hold move the time stop\n"
+                f"- Regime warning (SPY < 50 SMA): {'shown prominently' if d['regime_sensitive'] else 'informational only'}")
+            st.markdown('<p class="def-h">Rules (all must pass)</p>', unsafe_allow_html=True)
+            st.markdown("\n".join(f"{i}. {r}" for i, r in enumerate(d["rules"], 1)) or "—")
+            if d["trigger"]:
+                st.markdown('<p class="def-h">Entry trigger</p>', unsafe_allow_html=True)
+                st.markdown(d["trigger"])
+            st.markdown('<p class="def-h">Score (ranking)</p>', unsafe_allow_html=True)
+            st.markdown("\n".join(f"- {x}" for x in d["score_parts"]) or "—")
+            if d["best_when"] or d["fails_when"]:
+                st.markdown('<p class="def-h">Market fit</p>', unsafe_allow_html=True)
+                st.markdown(f"- Works best: {d['best_when']}\n- Struggles: {d['fails_when']}")
+            st.markdown('<p class="def-h">Data</p>', unsafe_allow_html=True)
+            st.markdown(f"{d['data']}  \nParameters: `{d['params']}`  \nLast changed: {d['changed'] or '—'}")
+
+    st.markdown("**Applies to every strategy**")
+    with st.expander("Universe & data"):
+        loaded = st.session_state.get("markets", {})
+        st.markdown(f"- Default universe: {' + '.join(S['universe'])} (a strategy can set its own — see its section)"
+                    + "".join(f"\n- Loaded {' + '.join(k)}: {v['uni_note']}" for k, v in loaded.items()) +
+                    f"\n- Price data: {PROVIDER.name}; daily bars, ~{S['history_days']} calendar days of history"
+                    "\n- During market hours today's partial bar is added and volume is projected to a full day"
+                    "\n- Every result shows whether it ran on live data or the last close, with timestamps")
+    with st.expander("Exclusions, ranking & warnings"):
+        st.markdown(
+            f"- Results ranked by score; top {S['top_n']} shown\n"
+            f"- Earnings within each strategy's exclusion window (default {S['earnings_window_days']} days) → removed\n"
+            "- Tickers without enough history for a rule's indicators are skipped\n"
+            "- Warnings: SPY below its 50 SMA · breadth < 40% · VIX ≥ "
+            f"{S['vix_warn_level']:g} or up 4+ pts in 5 days · latest bar older than the expected session")
+    with st.expander("Glossary"):
+        st.markdown("\n".join(f"- **{k}** — {v}" for k, v in GLOSSARY.items()))
+    with st.expander("Result card legend"):
+        st.markdown("\n".join(f"- {x}" for x in CARD_LEGEND))
+    with st.expander("Outcome scoring (Tracker)"):
+        st.markdown("\n".join(f"- {x}" for x in outcomes.RULES))
+    with st.expander("Change log"):
+        rows = sorted(((s.changed or "—", s.name) for s in strats), reverse=True)
+        st.markdown("\n".join(f"- {c} · {n}" for c, n in rows))
+
+
 # ───────────────────────── app
 strategies, strat_errors = discover()
 log = SheetLog(secret)
@@ -188,7 +310,10 @@ st.markdown("### 📈 Swing Screener")
 t = now_et()
 st.caption(f"{t:%a %b %d · %H:%M} ET · market {'open' if market_open(t) else 'closed'} · data: {PROVIDER.name}")
 
-tab_screen, tab_track, tab_status = st.tabs(["Screen", "Tracker", "Status"])
+# earnings are looked up far enough ahead to cover the longest hold (trading days → calendar days)
+EARN_HORIZON = max([S["earnings_window_days"]] + [int(s.hold[1] * 1.45) + 4 for s in strategies])
+
+tab_screen, tab_defs, tab_track, tab_status = st.tabs(["Screen", "Screening Definitions", "Tracker", "Status"])
 
 with tab_screen:
     if not strategies:
@@ -200,17 +325,23 @@ with tab_screen:
     pick = pick or names[0]
     st.session_state["pick"] = pick
     strat = next(s for s in strategies if s.name == pick)
-    st.caption(strat.description)
+    st.caption(f"{strat.description} · hold {strat.hold[0]}–{strat.hold[1]} days · {strat.target_r:g}R target")
 
     if st.button(f"Run {strat.name}", type="primary", width="stretch"):
         t0 = time.time()
-        with st.spinner("Loading market data…" if "market" not in st.session_state else "Screening…"):
-            m = load_market()
+        ukey = uni_key(strat)
+        first = ukey not in st.session_state.get("markets", {})
+        msg = f"Loading {' + '.join(ukey)} market data…" if first else "Screening…"
+        if strat.needs:
+            msg += " (fundamentals are fetched on the first run of the week — up to a minute)"
+        with st.spinner(msg):
+            m = load_market(ukey)
             today = now_et().date()
             res = pipeline.run_strategy(
                 strat, m["frames"], m["universe"], m["ctx"], S,
-                lambda syms: c_earnings(tuple(syms), today, S["earnings_window_days"]))
-        res.update(strategy=strat.key, name=strat.name, mode=m["mode"], secs=time.time() - t0,
+                lambda syms: c_earnings(tuple(sorted(syms)), today, EARN_HORIZON),
+                lookups={"fundamentals": get_fundamentals}, today=today)
+        res.update(strategy=strat.key, name=strat.name, mode=m["mode"], secs=time.time() - t0, uni=ukey,
                    ran=now_et())
         st.session_state.setdefault("results", {})[strat.key] = res
         if log.on:
@@ -230,11 +361,12 @@ with tab_screen:
 
     res = st.session_state.get("results", {}).get(strat.key)
     if res:
-        m = st.session_state["market"]
-        st.markdown(f"**{res['mode']}**")
+        m = st.session_state["markets"][res["uni"]]
+        st.markdown(f"**{res['mode']}** · {len(m['frames'])} symbols ({' + '.join(res['uni'])})")
         render_context(m, strat)
-        st.caption(f"{res['qualified']} qualified · {res['excluded_earnings']} dropped for earnings ≤"
-                   f"{S['earnings_window_days']}d ({res['earnings_source'] or '—'}) · showing top "
+        st.caption((f"{res['extra_note']} · " if res.get("extra_note") else "")
+                   + f"{res['qualified']} qualified · {res['excluded_earnings']} dropped for earnings ≤"
+                   f"{res['earnings_excl_days']}d ({res['earnings_source'] or '—'}) · showing top "
                    f"{len(res['results'])} · ran {res['ran']:%H:%M} ET in {res['secs']:.0f}s"
                    + (" · logged" if res.get("logged") else ""))
         if res.get("log_error"):
@@ -246,12 +378,15 @@ with tab_screen:
     else:
         st.info("Pick a strategy and tap Run. Nothing is screened until you do.")
 
+with tab_defs:
+    render_definitions(strategies)
+
 with tab_track:
     if not log.on:
         st.info(log.error)
     else:
-        st.caption(f"Signals are scored after {S['outcome_hold_days']} trading days: fill on entry trigger, "
-                   f"structure stop, {S['outcome_target_r']:g}R target, otherwise exit at the close.")
+        st.caption("Each signal is scored over its own strategy's max hold and target — rules on the "
+                   "Screening Definitions tab.")
         if st.button("Update outcomes", width="stretch"):
             with st.spinner("Scoring open signals…"):
                 sig = log.read_signals()
@@ -286,9 +421,8 @@ with tab_status:
         st.markdown(f"- {k}: {'✅ connected' if v else '— not set'}")
     if not keys["Alpaca"]:
         st.caption("Without Alpaca keys the app uses Yahoo data (no key, unofficial, may rate-limit).")
-    m = st.session_state.get("market")
-    if m:
-        st.markdown("**Data**")
+    for k, m in st.session_state.get("markets", {}).items():
+        st.markdown(f"**Data · {' + '.join(k)}**")
         st.markdown(f"- Universe: {m['uni_note']}\n- Loaded: {len(m['frames'])} symbols "
                     f"({m['missing']} universe tickers missing)\n- Latest bar: {m['last_bar']}\n- Mode: {m['mode']}")
     st.markdown("**Strategies loaded**")
@@ -300,6 +434,6 @@ with tab_status:
     st.json(S, expanded=False)
     if st.button("Clear data cache", width="stretch"):
         st.cache_data.clear()
-        st.session_state.pop("market", None)
+        st.session_state.pop("markets", None)
         st.session_state.pop("results", None)
         st.rerun()

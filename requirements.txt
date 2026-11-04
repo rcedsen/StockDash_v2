@@ -1,7 +1,0 @@
-streamlit==1.66.1
-pandas>=2.2
-numpy>=1.26
-requests>=2.31
-lxml>=5.0
-yfinance>=0.2.54
-gspread>=6.0

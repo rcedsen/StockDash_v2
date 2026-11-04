@@ -1,5 +1,10 @@
-"""Upcoming earnings dates. Finnhub (one call for the whole window) if FINNHUB_API_KEY is set,
-otherwise yfinance per ticker (only for the shortlisted candidates)."""
+"""Upcoming earnings dates. Finnhub (one call for the whole horizon) if FINNHUB_API_KEY is set,
+otherwise yfinance per ticker (only for shortlisted candidates).
+
+next_earnings() returns (dates, known, source):
+  dates[sym] = next report date or None
+  known      = symbols whose answer is reliable (a None in `known` means "no report in the horizon")
+The pipeline decides exclusion / time-stop capping per strategy from these dates."""
 from __future__ import annotations
 
 import datetime as dt
@@ -31,21 +36,18 @@ def _yf_one(sym: str, today: dt.date):
         return sym, None
 
 
-def next_earnings(symbols: list[str], today: dt.date, window_days: int, finnhub_key: str | None):
-    """Returns (dates, status, source). status[sym] in {'in_window','clear','unknown'}."""
-    end = today + dt.timedelta(days=window_days)
-    status, dates = {}, {}
+def next_earnings(symbols: list[str], today: dt.date, horizon_days: int, finnhub_key: str | None):
+    end = today + dt.timedelta(days=horizon_days)
     if finnhub_key:
         try:
             cal = _finnhub(finnhub_key, today, end)
-            for s in symbols:
-                dates[s] = cal.get(s)
-                status[s] = "in_window" if s in cal else "clear"
-            return dates, status, "Finnhub"
+            return {s: cal.get(s) for s in symbols}, set(symbols), "Finnhub"
         except Exception:
             pass
+    dates, known = {}, set()
     with ThreadPoolExecutor(8) as ex:
         for s, d in ex.map(lambda x: _yf_one(x, today), symbols):
             dates[s] = d
-            status[s] = "unknown" if d is None else ("in_window" if d <= end else "clear")
-    return dates, status, "Yahoo"
+            if d is not None:
+                known.add(s)
+    return dates, known, "Yahoo"

@@ -13,6 +13,25 @@ class Momentum(Strategy):
         rs_min=80,        # relative-strength percentile (blend of 1M and 3M vs SPY)
         slope_days=5,
     )
+    hold = (5, 20)
+    target_r = 3.0
+    atr_stop_mult = 2.0
+    stop_rule = "Below the 5-day low"
+    rules = [
+        "Close within {near_high:.0%} of the 52-week high",
+        "Relative strength ≥ {rs_min}th percentile of the universe (50% 1-month + 50% 3-month return vs SPY)",
+        "Close > 20 EMA, and the 20 EMA is higher than {slope_days} sessions ago",
+    ]
+    score_parts = [
+        "40% relative strength percentile ({rs_min}th → 100th)",
+        "30% trend smoothness (R² of a 63-day log-price line)",
+        "15% closeness to the 52-week high",
+        "15% close above the 10 EMA",
+    ]
+    trigger = "Buy-stop above today's high, or buy a dip to the 10 EMA"
+    best_when = "Trending markets with clear sector leadership"
+    fails_when = "Sharp rotations out of leaders / risk-off days — leaders gap down hardest"
+    changed = "2026-11-03"
 
     def evaluate(self, d, symbol, ctx):
         p, r = self.params, d.iloc[-1]

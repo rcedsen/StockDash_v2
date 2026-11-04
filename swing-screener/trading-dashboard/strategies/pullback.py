@@ -12,6 +12,26 @@ class Pullback(Strategy):
         min_pullback_atr=1.0, # close at least this far below the 10-day high
         slope_days=5,
     )
+    hold = (3, 10)
+    target_r = 2.0
+    atr_stop_mult = 1.5
+    stop_rule = "Below the 5-day swing low"
+    rules = [
+        "Close > 50-day SMA > 200-day SMA, and the 50 SMA is higher than {slope_days} sessions ago",
+        "Today's low within {touch_atr} × ATR(14) of the 20 EMA or the 50 SMA",
+        "Close at least {min_pullback_atr} × ATR below the 10-day high",
+        "Average volume of the last 3 sessions < 50-day average (orderly pullback)",
+    ]
+    score_parts = [
+        "30% trend strength (50 SMA 0–15% above the 200 SMA)",
+        "25% relative strength percentile vs SPY",
+        "20% pullback depth (best ≈ 1.5–3 ATR off the 10-day high)",
+        "25% reversal candle today (green close in the upper half of the range)",
+    ]
+    trigger = "Buy-stop above today's high — confirms buyers stepped in at the moving average"
+    best_when = "Established uptrends in a healthy market; works in mild chop"
+    fails_when = "When the pullback is the start of a trend change (breaks the 50 SMA on heavy volume)"
+    changed = "2026-11-03"
 
     def evaluate(self, d, symbol, ctx):
         p, r = self.params, d.iloc[-1]

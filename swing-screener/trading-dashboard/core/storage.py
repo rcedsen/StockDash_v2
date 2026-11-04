@@ -5,7 +5,8 @@ from __future__ import annotations
 import pandas as pd
 
 SIGNAL_COLS = ["run_id", "run_time_et", "strategy", "rank", "symbol", "score", "price", "entry",
-               "stop_structure", "stop_atr", "target_2r", "bar_date", "data_mode", "regime_ok",
+               "stop_structure", "stop_atr", "target_r", "target", "hold_max", "time_stop", "bar_date",
+               "data_mode", "regime_ok",
                "sector_state", "earnings", "status", "outcome", "outcome_r", "exit_date", "mfe_r",
                "mae_r", "notes"]
 RUN_COLS = ["run_id", "run_time_et", "strategy", "provider", "data_mode", "data_asof", "universe_n",

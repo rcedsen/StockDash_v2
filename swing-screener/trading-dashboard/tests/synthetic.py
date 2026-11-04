@@ -57,15 +57,34 @@ def market(end: dt.date):
     c = 20 * np.exp(0.005 * t + np.cumsum(r.normal(0, 0.002, N)))
     out["MOMO"] = _ohlcv(c, rng=0.006, seed=14)
 
+    # Quality dip: long uptrend, ~20% orderly decline over 25 sessions (no gap), then a turn-up day
+    c = 60 * np.exp(0.003 * t)
+    peak = c[-27]
+    c[-26:] = peak
+    c[-26:-1] = peak * np.linspace(0.99, 0.80, 25)
+    c[-1] = c[-2] * 1.03
+    out["QDIP"] = _ohlcv(c, rng=0.004, seed=15)
+
     for s, df in out.items():
         df.index = idx
     return out
 
 
 def universe():
-    syms = [f"R{i:02d}" for i in range(40)] + ["BRKO", "PULL", "OVSD", "MOMO"]
+    syms = [f"R{i:02d}" for i in range(40)] + ["BRKO", "PULL", "OVSD", "MOMO", "QDIP"]
     secs = list(SECTOR_ETF)
     return pd.DataFrame(dict(symbol=syms, name=syms, sector=[secs[i % len(secs)] for i in range(len(syms))]))
+
+
+GOOD_FUND = dict(roic=0.24, roic_src="ROI TTM", roe=0.3, sales_growth=0.22, sales_growth_src="TTM Y/Y",
+                 gm=0.62, gm_delta_pts=0.8, gm_src="TTM vs prior TTM", fcf_yield=0.028, fcf_margin=0.21,
+                 de=0.35, nd_ebitda=0.4, fwd_eps_growth=0.24, fwd_pe=28.0, peg=28.0 / 24, error=None)
+
+
+def fake_fundamentals(symbols, key=None):
+    """Only QDIP has fundamentals that pass; everything else fails sales growth."""
+    return {s: dict(GOOD_FUND, symbol=s) if s == "QDIP" else dict(GOOD_FUND, symbol=s, sales_growth=0.05)
+            for s in symbols}
 
 
 class SyntheticProvider(Provider):

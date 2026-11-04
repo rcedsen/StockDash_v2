@@ -1,5 +1,6 @@
-"""Shared screening pipeline: bars → indicators → strategy → rank → earnings filter → top N → enrich.
-Every strategy goes through this, so warnings, earnings exclusion and card fields apply to all."""
+"""Shared screening pipeline:
+bars → indicators → prefilter → (extra data for survivors) → strategy → rank → earnings rules → top N → card fields.
+Every strategy goes through this, so warnings, earnings rules, hold periods and card fields apply to all."""
 from __future__ import annotations
 
 import datetime as dt
@@ -32,18 +33,45 @@ def build_frames(history: dict[str, pd.DataFrame], today_bars: dict[str, pd.Seri
     return frames
 
 
+def bday_add(d: dt.date, n: int) -> dt.date:
+    return pd.Timestamp(np.busday_offset(np.datetime64(d), n, roll="forward")).date()
+
+
 def run_strategy(strategy: Strategy, frames: dict[str, pd.DataFrame], universe: pd.DataFrame,
-                 ctx: dict, settings: dict, earnings_lookup) -> dict:
-    """earnings_lookup(symbols) -> (dates, status, source)."""
+                 ctx: dict, settings: dict, earnings_lookup, lookups: dict | None = None,
+                 today: dt.date | None = None) -> dict:
+    """earnings_lookup(symbols) -> (dates, known, source).
+    lookups = {"fundamentals": fn(symbols) -> {sym: dict}, ...} for strategies that declare `needs`."""
+    today = today or dt.date.today()
+    lookups = lookups or {}
     sector_of = dict(zip(universe.symbol, universe.sector))
     name_of = dict(zip(universe.symbol, universe.name))
-    hits, errors = [], 0
+
+    # 1. cheap price-only prefilter
+    cands, errors = [], 0
     for s in universe.symbol:
         d = frames.get(s)
         if d is None:
             continue
         try:
-            st = strategy.evaluate(d, s, ctx)
+            if strategy.prefilter(d, s, ctx):
+                cands.append(s)
+        except Exception:
+            errors += 1
+
+    # 2. extra data only for survivors
+    sctx = dict(ctx)
+    extra_note = ""
+    for need in strategy.needs:
+        fn = lookups.get(need)
+        sctx[need] = fn(cands) if (fn and cands) else {}
+        extra_note = f"{len(cands)} passed the price prefilter → {need} checked"
+
+    # 3. full rules
+    hits = []
+    for s in cands:
+        try:
+            st = strategy.evaluate(frames[s], s, sctx)
         except Exception:
             errors += 1
             continue
@@ -52,21 +80,35 @@ def run_strategy(strategy: Strategy, frames: dict[str, pd.DataFrame], universe: 
     hits.sort(key=lambda x: x[1].score, reverse=True)
     n_qual = len(hits)
 
+    # 4. earnings: exclude reports inside the exclusion window; cap the time stop before later ones
+    excl = strategy.earnings_exclude_days or settings["earnings_window_days"]
     shortlist = hits[: settings["top_n"] * 3]
-    dates, status, src = earnings_lookup([s for s, _ in shortlist]) if shortlist else ({}, {}, "")
-    kept = [(s, st) for s, st in shortlist if status.get(s) != "in_window"]
+    dates, known, src = earnings_lookup([s for s, _ in shortlist]) if shortlist else ({}, set(), "")
+    excl_end = today + dt.timedelta(days=excl)
+    kept = [(s, st) for s, st in shortlist if not (dates.get(s) and dates[s] <= excl_end)]
     n_earn = len(shortlist) - len(kept)
 
     rows = []
-    k = settings["atr_stop_mult"]
+    k = strategy.atr_stop_mult or settings["atr_stop_mult"]
     for rank, (s, st) in enumerate(kept[: settings["top_n"]], start=1):
-        r = frames[s].iloc[-1]
+        f = frames[s]
+        r = f.iloc[-1]
+        bar_date = f.index[-1].date()
         sec = sector_of.get(s) or ""
         sinfo = ctx.get("sectors", {}).get(sec, {})
         etf = SECTOR_ETF.get(sec)
         etf_ret = sinfo.get("ret21", np.nan)
         stop_atr = st.entry - k * r.atr
         risk = st.entry - st.stop_structure
+
+        hold_min, hold_max = strategy.hold
+        time_stop = bday_add(bar_date, hold_max)
+        earn = dates.get(s)
+        earn_in_hold = bool(earn and earn <= time_stop)
+        if earn_in_hold:
+            time_stop = pd.Timestamp(np.busday_offset(np.datetime64(earn), -1, roll="backward")).date()
+        earn_status = "date" if earn else ("clear" if s in known else "unknown")
+
         rows.append(dict(
             rank=rank, symbol=s, name=name_of.get(s, ""), sector=sec, sector_etf=etf or "",
             sector_state=sinfo.get("state", "—"), sector_rs21=sinfo.get("rs21", np.nan),
@@ -74,13 +116,15 @@ def run_strategy(strategy: Strategy, frames: dict[str, pd.DataFrame], universe: 
             score=round(float(st.score), 1), price=float(r.close), chg1=float(r.chg1),
             atr=float(r.atr), entry=float(st.entry), entry_note=st.entry_note,
             stop_structure=float(st.stop_structure), stop_note=st.stop_note,
-            stop_atr=float(stop_atr),
+            stop_atr=float(stop_atr), atr_mult=k,
             risk_struct_pct=100 * risk / st.entry if st.entry else np.nan,
             risk_atr_pct=100 * (st.entry - stop_atr) / st.entry if st.entry else np.nan,
-            target_2r=float(st.entry + settings["outcome_target_r"] * risk) if risk > 0 else np.nan,
+            target_r=strategy.target_r,
+            target=float(st.entry + strategy.target_r * risk) if risk > 0 else np.nan,
             target_hint=st.target_hint, target_note=st.target_note,
-            notes=st.notes, rs_pct=ctx.get("rs_pct", {}).get(s, np.nan),
-            earnings=dates.get(s), earnings_status=status.get(s, "unknown"),
-            bar_date=frames[s].index[-1].date(),
+            hold_min=hold_min, hold_max=hold_max, time_stop=time_stop, earn_in_hold=earn_in_hold,
+            notes=st.notes, tags=st.tags, rs_pct=ctx.get("rs_pct", {}).get(s, np.nan),
+            earnings=earn, earnings_status=earn_status, bar_date=bar_date,
         ))
-    return dict(results=rows, qualified=n_qual, excluded_earnings=n_earn, errors=errors, earnings_source=src)
+    return dict(results=rows, qualified=n_qual, excluded_earnings=n_earn, errors=errors,
+                earnings_source=src, prefiltered=len(cands), extra_note=extra_note, earnings_excl_days=excl)

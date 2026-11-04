@@ -13,6 +13,25 @@ class OversoldBounce(Strategy):
         stretch_atr=2.0,  # or this many ATRs below the 10 EMA
         support_atr=1.0,  # "near support" = within this many ATRs of 50 SMA / 200 SMA / 50-day low
     )
+    hold = (2, 5)
+    target_r = 1.5
+    atr_stop_mult = 1.5
+    stop_rule = "Below the 3-day low"
+    rules = [
+        "Close > 200-day SMA (long-term uptrend intact)",
+        "RSI(2) < {rsi2_max}, OR close ≥ {stretch_atr} × ATR(14) below the 10 EMA",
+    ]
+    score_parts = [
+        "20% RSI(2) depth below {rsi2_max}",
+        "20% stretch below the 10 EMA (1 → 3 ATR)",
+        "30% proximity of today's low to support (50 SMA, 200 SMA or 50-day low; 0 → {support_atr}×2 ATR)",
+        "15% 200 SMA rising over the last 20 sessions",
+        "15% distance above the 200 SMA (0 → 20%)",
+    ]
+    trigger = "Buy-stop above today's high — don't buy while it's still falling"
+    best_when = "Bull markets with brief shakeouts; VIX spiking then turning down"
+    fails_when = "Bear markets / stocks with a falling 200 SMA — 'oversold' keeps getting more oversold"
+    changed = "2026-11-03"
 
     def evaluate(self, d, symbol, ctx):
         p, r = self.params, d.iloc[-1]

@@ -1,15 +1,23 @@
 """Score logged signals after the fact.
 
-Rules (same for every strategy):
+Rules (same logic for every strategy; hold and target come from each strategy):
 - Entry fills when price trades through the entry trigger (at the open if it gaps above).
-- Stop = structure stop; target = entry + target_R × risk (default 2R).
+- Stop = structure stop; target = entry + strategy target_R × risk.
 - If stop and target are both touched on one bar, the stop is assumed first (conservative).
-- Still open after `hold_days` trading days → exit at that day's close.
-- Never triggered within `hold_days` → 'no trigger'.
+- Still open after the strategy's max hold (trading days) → exit at that day's close.
+- Never triggered within the max hold → 'no trigger'.
 """
 from __future__ import annotations
 
 import pandas as pd
+
+RULES = [
+    "Entry fills when price trades through the entry trigger (at the open if it gaps above it).",
+    "Stop = structure stop. Target = entry + the strategy's target R × risk.",
+    "If stop and target are both touched on the same bar, the stop is assumed to hit first.",
+    "Still open at the strategy's max hold → exit at that day's close (\"time\").",
+    "Never triggered within the max hold → \"no trigger\" (not counted in R).",
+]
 
 
 def score_signal(entry: float, stop: float, target: float, bars: pd.DataFrame, hold_days: int) -> dict | None:
@@ -57,8 +65,9 @@ def update_outcomes(sig: pd.DataFrame, history: dict[str, pd.DataFrame], hold_da
         h = history.get(row.symbol)
         try:
             d0 = pd.Timestamp(row.bar_date)
-            res = score_signal(float(row.entry), float(row.stop_structure), float(row.target_2r),
-                               h[h.index > d0] if h is not None else pd.DataFrame(), hold_days)
+            hold = int(float(row.hold_max)) if str(row.get("hold_max", "")).strip() else hold_days
+            res = score_signal(float(row.entry), float(row.stop_structure), float(row.target),
+                               h[h.index > d0] if h is not None else pd.DataFrame(), hold)
         except Exception:
             continue
         if res:

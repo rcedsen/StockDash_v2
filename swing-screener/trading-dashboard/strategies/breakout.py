@@ -12,6 +12,26 @@ class Breakout(Strategy):
         base_max_atr=4.0,    # prior 20-day range ≤ this many ATRs (lower = tighter base)
         slope_days=5,        # 50 SMA must be higher than it was this many days ago
     )
+    hold = (5, 15)
+    target_r = 2.5
+    atr_stop_mult = 1.5
+    stop_rule = "Below the breakout-day low"
+    rules = [
+        "Close > highest high of the prior 20 sessions",
+        "Volume ≥ {vol_mult}× the 50-day average (intraday: projected to a full day)",
+        "Close > 50-day SMA, and the 50 SMA is higher than {slope_days} sessions ago",
+        "Base: prior 20-day high–low range ≤ {base_max_atr} × ATR(14)",
+    ]
+    score_parts = [
+        "35% volume surge ({vol_mult}× → 3×)",
+        "25% base tightness ({base_max_atr} ATR → 2 ATR)",
+        "25% relative strength percentile vs SPY (50th → 100th)",
+        "15% close location in today's range (top of range = best)",
+    ]
+    trigger = "Buy-stop above the breakout-day high, or buy a retest of the breakout level that holds"
+    best_when = "SPY above a rising 50 SMA, breadth > 50%, the stock's sector leading"
+    fails_when = "Choppy or falling markets — breakouts reverse back into the base"
+    changed = "2026-11-03"
 
     def evaluate(self, d, symbol, ctx):
         p, r = self.params, d.iloc[-1]
