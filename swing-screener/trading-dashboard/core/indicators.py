@@ -47,4 +47,9 @@ def add_all(df: pd.DataFrame) -> pd.DataFrame:
     d["ret21"] = c / c.shift(21) - 1
     d["ret63"] = c / c.shift(63) - 1
     d["chg1"] = c / c.shift(1) - 1
+    # added for Quality dip v2 (all causal: each value uses only that session and earlier)
+    d["vol20"] = d.volume.shift(1).rolling(20).mean()          # prior 20 completed sessions
+    d["ret20"] = c / c.shift(20) - 1
+    d["ret60"] = c / c.shift(60) - 1
+    d["sma200_20ago"] = d.sma200.shift(20)
     return d

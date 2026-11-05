@@ -76,9 +76,13 @@ def universe():
     return pd.DataFrame(dict(symbol=syms, name=syms, sector=[secs[i % len(secs)] for i in range(len(syms))]))
 
 
-GOOD_FUND = dict(roic=0.24, roic_src="ROI TTM", roe=0.3, sales_growth=0.22, sales_growth_src="TTM Y/Y",
-                 gm=0.62, gm_delta_pts=0.8, gm_src="TTM vs prior TTM", fcf_yield=0.028, fcf_margin=0.21,
-                 de=0.35, nd_ebitda=0.4, fwd_eps_growth=0.24, fwd_pe=28.0, peg=28.0 / 24, error=None)
+GOOD_FUND = dict(roic=0.24, roic_src="ROIC (NOPAT TTM ÷ invested capital)", roic_is_proxy=False, roe=0.3,
+                 sales_growth=0.22, sales_growth_src="TTM vs prior TTM", sales_growth_latest_q=0.21,
+                 gm=0.62, gm_prior=0.612, gm_delta_pts=0.8, gm_src="TTM vs prior TTM", op_margin_delta_pts=0.5,
+                 fcf_ttm=1e9, fcf_basis="TTM OCF − capex (GAAP cash-flow statement)", fcf_yield=0.028, fcf_margin=0.21,
+                 de=0.35, nd_ebitda=0.4, eps_cy=4.0, eps_ny=4.96, eps_basis="consensus FY+1 vs FY0 (analyst-adjusted)",
+                 fwd_eps_growth=0.24, fwd_pe=24.0, peg=1.0, peg_meaningful=True, peg_note=None, trailing_eps=3.6,
+                 eps_rev_30d=0.02, rev_rev_30d=None, guidance_cut=None, notes=[], error=None)
 
 
 def fake_fundamentals(symbols, key=None):

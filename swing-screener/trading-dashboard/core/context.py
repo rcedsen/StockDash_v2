@@ -24,8 +24,19 @@ def build_context(frames: dict[str, pd.DataFrame], universe: pd.DataFrame, vix: 
     # ── regime
     if spy is not None:
         c, s50, s200 = _last(spy, "close"), _last(spy, "sma50"), _last(spy, "sma200")
-        ctx["spy"] = dict(close=c, sma50=s50, sma200=s200, chg1=_last(spy, "chg1"))
+        s50_prev = float(spy.sma50.iloc[-11]) if len(spy) > 11 else np.nan
+        rising = bool(s50 > s50_prev)
+        ctx["spy"] = dict(close=c, sma50=s50, sma200=s200, chg1=_last(spy, "chg1"), sma50_rising=rising)
         ctx["regime_ok"] = bool(c > s50)
+        # v2 regime points: above rising 50 SMA 4 · above 50 SMA (not rising) 3 · above 200 only 2 · below 200 0
+        if c > s50 and rising:
+            ctx["regime_points"], ctx["regime_label"] = 4, "SPY above rising 50 SMA"
+        elif c > s50:
+            ctx["regime_points"], ctx["regime_label"] = 3, "SPY above flat/falling 50 SMA"
+        elif c > s200:
+            ctx["regime_points"], ctx["regime_label"] = 2, "SPY above 200 SMA, below 50 SMA"
+        else:
+            ctx["regime_points"], ctx["regime_label"] = 0, "SPY below 200 SMA"
         if not ctx["regime_ok"]:
             ctx["warnings"].append(f"SPY is below its 50-day SMA ({c:,.2f} < {s50:,.2f}) — breakouts and momentum fail more often.")
     else:
@@ -71,4 +82,27 @@ def build_context(frames: dict[str, pd.DataFrame], universe: pd.DataFrame, vix: 
     rs = pd.Series(rs, dtype=float)
     ctx["rs_pct"] = (rs.rank(pct=True) * 100).to_dict()
     ctx["spy_ret21"] = spy21
+
+    # ── v2: 20/60-day relative performance vs SPY and vs the stock's sector ETF, as percentiles
+    spy20 = _last(spy, "ret20") if spy is not None else 0.0
+    spy60 = _last(spy, "ret60") if spy is not None else 0.0
+    sector_of = dict(zip(universe.symbol, universe.sector))
+    etf_ret = {}
+    for name, etf in SECTOR_ETF.items():
+        d = frames.get(etf)
+        if d is not None:
+            etf_ret[name] = (_last(d, "ret20"), _last(d, "ret60"))
+    ex_spy, ex_sec = {}, {}
+    for s in syms:
+        d = frames[s]
+        r20, r60 = _last(d, "ret20"), _last(d, "ret60")
+        if not (np.isfinite(r20) and np.isfinite(r60)):
+            continue
+        ex_spy[s] = 0.5 * (r20 - spy20) + 0.5 * (r60 - spy60)
+        er = etf_ret.get(sector_of.get(s))
+        if er and np.isfinite(er[0]) and np.isfinite(er[1]):
+            ex_sec[s] = 0.5 * (r20 - er[0]) + 0.5 * (r60 - er[1])
+    ctx["rs_spy_excess"], ctx["rs_sector_excess"] = ex_spy, ex_sec
+    ctx["rs_spy_pct"] = (pd.Series(ex_spy, dtype=float).rank(pct=True) * 100).to_dict()
+    ctx["rs_sector_pct"] = (pd.Series(ex_sec, dtype=float).rank(pct=True) * 100).to_dict()
     return ctx

@@ -10,7 +10,7 @@ import pandas as pd
 import streamlit as st
 
 from core import context as cctx
-from core import earnings, fundamentals, outcomes, pipeline
+from core import earnings, fundamentals, outcomes, pipeline, qd2, sizing
 from core.data import ET, get_provider, market_open, now_et
 from core.settings import SECTOR_ETF, get_settings, secret
 from core.storage import SheetLog
@@ -161,17 +161,28 @@ def render_card(r: dict):
     else:
         earn_txt = "unknown — check before entry"
     sector_pill = f'<span class="pill">{r["sector_etf"]} {r["sector_state"]}</span>' if r["sector_etf"] else ""
-    tag_pills = "".join(f'<span class="pill {"tag-ready" if t == "Ready" else ""}">{t}</span>' for t in r["tags"])
+    tag_pills = "".join(f'<span class="pill {"tag-ready" if t in ("Ready", "Highest priority", "Strong") else ""}">{t}</span>'
+                        for t in r["tags"])
+    stop_line = f'<p class="kv">Stop <b>{fmt(r["stop_structure"])}</b> structure (−{fmt(r["risk_struct_pct"], 1)}%)'
+    if r.get("atr_mult"):
+        stop_line += f' · <b>{fmt(r["stop_atr"])}</b> {r["atr_mult"]:g}×ATR (−{fmt(r["risk_atr_pct"], 1)}%)'
+    stop_line += "</p>"
+    extra = "".join(f'<p class="kv">{x}</p>' for x in r.get("extra", []))
+    size = sizing.position_size(st.session_state.get("sz_equity", 0.0), st.session_state.get("sz_risk", 0.0),
+                                r["entry"], r["stop_structure"], st.session_state.get("sz_maxpos") or None)
+    size_line = (f'<p class="kv">Size <b>{size["shares"]:,} sh</b> · ${size["position_value"]:,.0f} · '
+                 f'risk ${size["actual_risk"]:,.0f}{(" · " + size["note"]) if size["note"] else ""}</p>'
+                 if st.session_state.get("sz_equity") else "")
     with st.container(border=True):
         st.markdown(
             f'<p class="card-h">{r["rank"]} · {r["symbol"]} <span class="pill">score {r["score"]:.0f}</span>{tag_pills}</p>'
             f'<p class="card-sub">{r["name"]} · ${fmt(r["price"])} {pct(r["chg1"])} {sector_pill}</p>'
             f'<p class="kv">Entry <b>{fmt(r["entry"])}</b> · {r["entry_note"]}</p>'
-            f'<p class="kv">Stop <b>{fmt(r["stop_structure"])}</b> structure (−{fmt(r["risk_struct_pct"], 1)}%)'
-            f' · <b>{fmt(r["stop_atr"])}</b> {r["atr_mult"]:g}×ATR (−{fmt(r["risk_atr_pct"], 1)}%)</p>'
+            + stop_line +
             f'<p class="kv">Target <b>{fmt(r["target"])}</b> ({r["target_r"]:g}R)'
             + (f' · {r["target_note"]} <b>{fmt(r["target_hint"])}</b>' if r["target_hint"] else "")
-            + f'</p><p class="kv">Hold {r["hold_min"]}–{r["hold_max"]} days · time stop <b>{r["time_stop"]:%a %b %d}</b></p>'
+            + "</p>" + extra + size_line
+            + f'<p class="kv">Hold {r["hold_min"]}–{r["hold_max"]} days · time stop <b>{r["time_stop"]:%a %b %d}</b></p>'
             f'<p class="kv">Earnings: {earn_txt}</p>',
             unsafe_allow_html=True)
         with st.expander("Why it qualified"):
@@ -179,12 +190,51 @@ def render_card(r: dict):
                 st.markdown(f"- {n}")
             st.markdown(f"- {r['stop_note']}")
             vs = r["vs_sector21"]
-            if r["sector"]:
+            if r["sector"] and r["sector_etf"]:
                 st.markdown(f"- Sector: {r['sector']} ({r['sector_etf']}, {r['sector_state']}, "
                             f"1M vs SPY {fmt(100 * r['sector_rs21'], 1)}%)")
+            elif r["sector"]:
+                st.markdown(f"- Sector: {r['sector']}")
             if vs is not None and np.isfinite(vs):
                 st.markdown(f"- Stock vs sector, 1M: {vs * 100:+.1f}%")
             st.caption(f"Bar date {r['bar_date']} · ATR {fmt(r['atr'])}")
+
+
+SECTIONS = [("Top", ["Highest priority", "Strong"]), ("Watchlist/pass", ["Watchlist", "Pass"]), ("Setting up", ["Setting up"]),
+            ("Risk too wide", ["Triggered — unacceptable risk"]), ("Excluded", ["Excluded"])]
+
+
+def render_full_report(res, m):
+    """Quality dip v2: every constituent classified; five lists + CSV and report downloads."""
+    rep = res["report"]
+    counts = rep["stats"]["counts"]
+    st.caption(f"Regime: {m['ctx'].get('regime_label', 'n/a')} (informational — never excludes) · "
+               + " · ".join(f"{c} {counts.get(c, 0)}" for c in qd2.CLASS_ORDER))
+    labels = [f"{n} ({sum(counts.get(c, 0) for c in cl)})" for n, cl in SECTIONS]
+    default = next((lab for lab, (_, cl) in zip(labels, SECTIONS) if sum(counts.get(c, 0) for c in cl)), labels[0])
+    pick = st.segmented_control("List", labels, default=default, key=f"qd2_sec_{res['ran']:%H%M%S}",
+                                label_visibility="collapsed") or default
+    name, classes = SECTIONS[labels.index(pick)]
+    csv = qd2.to_csv_rows(rep["rows"])
+    if name == "Excluded":
+        ex = csv[csv.classification == "Excluded"][["ticker", "stage", "reasons", "pct_below_52w_high"]]
+        st.dataframe(ex, hide_index=True, width="stretch", height=420)
+    else:
+        cards = [c for cl in classes for c in rep["cards"].get(cl, [])]
+        if not cards:
+            st.info("Nothing in this list right now.")
+        for i, c in enumerate(cards[: max(S["top_n"], 25)], 1):
+            render_card(dict(c, rank=i))
+        if len(cards) > max(S["top_n"], 25):
+            st.caption(f"{len(cards) - max(S['top_n'], 25)} more in the CSV.")
+    day = rep["rows"][0].get("bar_date") if rep["rows"] else ""
+    c1, c2 = st.columns(2)
+    c1.download_button("CSV · all constituents", csv.to_csv(index=False).encode(), f"quality_dip_v2_{day}.csv",
+                       "text/csv", width="stretch")
+    c2.download_button("Ranked report", qd2.report_markdown(rep, m["ctx"]).encode(), f"quality_dip_v2_{day}.md",
+                       "text/markdown", width="stretch")
+    st.caption("Fundamentals are fetched only for stocks that pass the technical screen; the CSV says which stage "
+               "each ticker reached. Score bands are initial thresholds, not validated predictions.")
 
 
 def render_context(m, strategy):
@@ -327,6 +377,15 @@ with tab_screen:
     strat = next(s for s in strategies if s.name == pick)
     st.caption(f"{strat.description} · hold {strat.hold[0]}–{strat.hold[1]} days · {strat.target_r:g}R target")
 
+    with st.expander("Position sizing", expanded=False):
+        st.number_input("Account equity ($) — 0 hides sizing", min_value=0.0, step=1000.0, key="sz_equity")
+        st.number_input("Risk per trade (% of equity)", min_value=0.0, max_value=100.0, step=0.25,
+                        value=sizing.DEFAULT_RISK_PCT, key="sz_risk",
+                        help="0.5% is only an example starting value, not a recommendation.")
+        st.number_input("Max position size (% of equity) — 0 = no cap", min_value=0.0, max_value=100.0,
+                        step=5.0, key="sz_maxpos")
+        st.caption("Shares = equity × risk% ÷ (entry − structure stop), rounded down, then capped by max position.")
+
     if st.button(f"Run {strat.name}", type="primary", width="stretch"):
         t0 = time.time()
         ukey = uni_key(strat)
@@ -371,10 +430,13 @@ with tab_screen:
                    + (" · logged" if res.get("logged") else ""))
         if res.get("log_error"):
             st.caption(f"Log failed: {res['log_error']}")
-        if not res["results"]:
-            st.info("No tickers meet this strategy's rules right now.")
-        for r in res["results"]:
-            render_card(r)
+        if res.get("report"):
+            render_full_report(res, m)
+        else:
+            if not res["results"]:
+                st.info("No tickers meet this strategy's rules right now.")
+            for r in res["results"]:
+                render_card(r)
     else:
         st.info("Pick a strategy and tap Run. Nothing is screened until you do.")
 

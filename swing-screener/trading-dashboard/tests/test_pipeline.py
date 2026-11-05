@@ -45,6 +45,8 @@ def test_each_strategy_finds_its_planted_setup():
     frames, uni, ctx = _setup()
     expect = {"breakout": "BRKO", "pullback": "PULL", "oversold": "OVSD", "momentum": "MOMO", "quality_dip": "QDIP"}
     for s in discover()[0]:
+        if getattr(s, "full_report", False):
+            continue                     # Quality dip v2 has its own tests (test_qd2.py)
         res = pipeline.run_strategy(s, frames, uni, ctx, DEFAULTS, no_earnings, LOOKUPS, TODAY)
         syms = [r["symbol"] for r in res["results"]]
         assert expect[s.key] in syms, (s.key, syms)
@@ -54,40 +56,6 @@ def test_each_strategy_finds_its_planted_setup():
             assert 0 <= r["score"] <= 100
             assert (r["hold_min"], r["hold_max"]) == s.hold
             assert r["time_stop"] == pipeline.bday_add(r["bar_date"], s.hold[1])
-
-
-def test_quality_dip_details():
-    frames, uni, ctx = _setup()
-    s = _strat("quality_dip")
-    res = pipeline.run_strategy(s, frames, uni, ctx, DEFAULTS, no_earnings, LOOKUPS, TODAY)
-    q = next(r for r in res["results"] if r["symbol"] == "QDIP")
-    assert q["tags"] == ["Ready"]                         # turn-up day after an RSI(2) washout
-    assert [r["symbol"] for r in res["results"]] == ["QDIP"]   # others fail fundamentals
-    assert "fundamentals" in res["extra_note"]
-    # fundamentals only requested for prefilter survivors
-    asked = []
-    spy = lambda syms: (asked.extend(syms), fake_fundamentals(syms))[1]
-    pipeline.run_strategy(s, frames, uni, ctx, DEFAULTS, no_earnings, {"fundamentals": spy}, TODAY)
-    assert "QDIP" in asked and len(asked) < len(uni) / 2
-
-
-def test_quality_dip_rejects_failing_metric_and_gap():
-    frames, uni, ctx = _setup()
-    s = _strat("quality_dip")
-    bad = lambda syms: {x: dict(fake_fundamentals([x])[x], peg=2.4) for x in syms}
-    res = pipeline.run_strategy(s, frames, uni, ctx, DEFAULTS, no_earnings, {"fundamentals": bad}, TODAY)
-    assert "QDIP" not in [r["symbol"] for r in res["results"]]
-    # plant a heavy-volume 8% gap-down 10 sessions ago
-    from core import indicators
-    d = frames["QDIP"][["open", "high", "low", "close", "volume"]].copy()
-    i = d.index[-10]
-    d.loc[i, ["open", "high", "low", "close"]] = d.loc[i, ["open", "high", "low", "close"]] * 0.92
-    d.loc[i, "high"] = max(d.loc[i, "open"], d.loc[i, "close"]) * 1.002
-    d.loc[i, "volume"] = 4e6
-    d["vol_proj"] = d.volume
-    f2 = dict(frames, QDIP=indicators.add_all(d))
-    res = pipeline.run_strategy(s, f2, uni, ctx, DEFAULTS, no_earnings, LOOKUPS, TODAY)
-    assert "QDIP" not in [r["symbol"] for r in res["results"]]
 
 
 def test_earnings_exclusion_and_time_stop_cap():

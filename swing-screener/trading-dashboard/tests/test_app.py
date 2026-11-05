@@ -36,9 +36,11 @@ def test_app_runs_all_strategies(monkeypatch):
         assert sym in html, (name, html[:500])
         assert "time stop" in html
         if name == "Quality dip":
-            assert "russell1000" in html
+            assert "russell1000" in html and "Stop distance" in html
+            assert {b.label for b in at.get("download_button")} >= {"CSV · all constituents", "Ranked report"}
 
     defs = " ".join(m.value for m in at.tabs[1].markdown)
-    for frag in ["15%–30% below the 52-week high", "ROIC ≥ 15%", "PEG ≤ 1.5", "Within 5%".lower()]:
+    for frag in ["10%–30% below the 252-session high", "ROIC ≥ 10%", "200 SMA ≥ its value 20 sessions ago",
+                 "A+D (15)", "within 5%"]:
         assert frag.lower() in defs.lower(), frag
     assert "{" not in defs.replace("{'", "").replace("{\"", ""), "unfilled placeholder"

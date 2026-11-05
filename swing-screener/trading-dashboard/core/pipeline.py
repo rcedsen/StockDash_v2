@@ -44,6 +44,18 @@ def run_strategy(strategy: Strategy, frames: dict[str, pd.DataFrame], universe: 
     lookups = {"fundamentals": fn(symbols) -> {sym: dict}, ...} for strategies that declare `needs`."""
     today = today or dt.date.today()
     lookups = lookups or {}
+    if getattr(strategy, "full_report", False):
+        # strategy evaluates & classifies the whole universe itself (e.g. Quality dip v2)
+        rep = strategy.report(frames, universe, ctx, settings, lookups, earnings_lookup, today)
+        st = rep["stats"]
+        top = rep["cards"].get("Highest priority", []) + rep["cards"].get("Strong", [])
+        return dict(results=top, report=rep, qualified=st["evaluated"],
+                    excluded_earnings=sum(1 for r in rep["rows"] if any(str(e).startswith("earnings in")
+                                                                        for e in r.get("exclusions") or [])),
+                    errors=0, earnings_source=st.get("earnings_source", ""), prefiltered=st["technical_pass"],
+                    extra_note=f"{st['universe']} constituents · {st['technical_pass']} passed technical → "
+                               f"{st['evaluated']} fully evaluated ({st['fundamentals_returned']} with fundamentals)",
+                    earnings_excl_days=strategy.params.get("earn_exclude", settings["earnings_window_days"]))
     sector_of = dict(zip(universe.symbol, universe.sector))
     name_of = dict(zip(universe.symbol, universe.name))
 

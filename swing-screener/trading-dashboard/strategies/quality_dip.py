@@ -1,164 +1,118 @@
-from core.strategy import Setup, Strategy
-from strategies._util import ok, scale
+"""Quality dip v2 — 'Pullback Swing Trading Screener v2.0'. Logic lives in core/qd2.py (shared with the
+backtest); this file holds the plug-in metadata and turns engine rows into result cards."""
+from core import qd2
+from core.strategy import Strategy
+
+P = qd2.PARAMS
 
 
-def _pct(x, nd=0):
+def _pc(x, nd=0):
     return "n/a" if x is None else f"{x * 100:.{nd}f}%"
 
 
 class QualityDip(Strategy):
     key = "quality_dip"
     name = "Quality dip"
-    description = "Russell 1000 · profitable fast growers 15–30% off their high, below the 50 SMA but above the 200 SMA."
+    description = "v2 · Russell 1000 profitable growers 10–30% off the high, below the 50 SMA, above a flat/rising 200 SMA."
     order = 50
     regime_sensitive = False
-    universe = ["sp500", "ndx100", "russell1000"]   # mid-cap growers too; S&P labels win on overlap
-    params = dict(
-        # price (prefilter — checked before any fundamentals are fetched)
-        off_high_min=0.15, off_high_max=0.30,
-        # fundamentals
-        roic_min=0.15,
-        gm_drop_max_pts=1.0,          # gross margin may slip at most this many points Y/Y
-        fcf_yield_min=0.02, fcf_margin_min=0.15,
-        de_max=0.8, nd_ebitda_max=2.0,
-        sales_growth_min=0.15, fwd_eps_growth_min=0.15,
-        peg_max=1.5, peg_max_fast=2.0, fast_growth=0.25,
-        max_missing=1,                # metrics allowed to be unavailable (shown as n/a)
-        # "why did it dip" check
-        gap_down=0.05, gap_vol_mult=2.0, gap_lookback=15, exclude_gap=True,
-        # timing trigger (Ready badge)
-        rsi2_trigger=10, sma200_touch_atr=1.0,
-    )
-    hold = (10, 30)
+    universe = ["russell1000"]
+    params = P
+    hold = (P["hold_min"], P["hold_max"])
     target_r = 3.0
     atr_stop_mult = 2.0
-    stop_rule = "Below the 10-day low"
-    rules = [
-        "PRICE · Close {off_high_min:.0%}–{off_high_max:.0%} below the 52-week high",
-        "PRICE · Close < 50-day SMA and > 200-day SMA (short-term dip inside a long-term uptrend)",
-        "QUALITY · ROIC ≥ {roic_min:.0%} (Finnhub ROI TTM; ROE used as proxy without a Finnhub key)",
-        "QUALITY · Gross margin stable or expanding: TTM ≥ prior-year TTM − {gm_drop_max_pts} pt",
-        "QUALITY · FCF yield ≥ {fcf_yield_min:.0%} OR FCF margin ≥ {fcf_margin_min:.0%}",
-        "QUALITY · Debt/Equity ≤ {de_max} OR net debt/EBITDA ≤ {nd_ebitda_max}",
-        "GROWTH · Sales growth ≥ {sales_growth_min:.0%} Y/Y (TTM when 8 quarters are available)",
-        "GROWTH · Forward EPS growth ≥ {fwd_eps_growth_min:.0%} (next-FY EPS estimate vs trailing EPS)",
-        "VALUE · PEG ≤ {peg_max} (≤ {peg_max_fast} when forward growth ≥ {fast_growth:.0%}); PEG = forward P/E ÷ forward EPS growth",
-        "At most {max_missing} metric may be unavailable; every available metric must pass",
-        "EXCLUDE · Any gap-down ≥ {gap_down:.0%} on ≥ {gap_vol_mult}× volume in the last {gap_lookback} sessions (likely earnings/news re-rating, not a dip)",
-    ]
-    trigger = ("'Ready' badge when ANY fires: (a) RSI(2) < {rsi2_trigger} yesterday and today closes above "
-               "yesterday's high; (b) close reclaims the 10 EMA; (c) a low within {sma200_touch_atr} ATR of the "
-               "200 SMA in the last 5 sessions and today closes above yesterday's high. Otherwise 'Setting up' "
-               "— watch, don't buy yet.")
-    score_parts = [
-        "50% QUALITY/GROWTH: ROIC 15→35% (10), sales growth 15→40% (10), fwd EPS growth 15→40% (8), "
-        "PEG 1.5→0.8 (8), FCF yield 2→6% (7), gross-margin trend (4), low leverage (3)",
-        "50% ENTRY: trigger fired (20), relative strength percentile (10), dip depth sweet spot ≈20% off high (10), "
-        "proximity to the 200 SMA (10)",
-    ]
-    best_when = "Market pullbacks / sector rotations that drag good companies down with everything else"
-    fails_when = "Company-specific bad news (guidance cuts) — the gap check filters the obvious ones"
-    data = "Daily price & volume + quarterly fundamentals (Yahoo; Finnhub ROI if key set), cached 7 days"
-    changed = "2026-11-03"
+    stop_rule = "Lowest low of the last 10 sessions − 0.1 × ATR(14); distance should be 1.5–2.5 ATR"
+    full_report = True          # returns every constituent with a classification (see core/qd2.run_screen)
     needs = ("fundamentals",)
+    rules = [
+        "TECHNICAL · Close {off_high_min:.0%}–{off_high_max:.0%} below the 252-session high",
+        "TECHNICAL · Close < 50 SMA and > 200 SMA",
+        "TECHNICAL · 200 SMA ≥ its value {sma200_slope_days} sessions ago (flat or rising)",
+        "FUNDAMENTAL · ROIC ≥ {roic_min:.0%} (computed NOPAT ÷ invested capital; proxies labeled and lower confidence)",
+        "FUNDAMENTAL · Sales growth ≥ {sales_min:.0%} (TTM vs prior TTM when 8 quarters exist; basis shown)",
+        "FUNDAMENTAL · Forward EPS growth ≥ {eps_min:.0%} — consensus FY+1 vs FY0 only (no GAAP/adjusted mixing)",
+        "FUNDAMENTAL · Gross margin: stable/improving full credit · −{gm_stable_pts:g} to −{gm_fail_pts:g} pt reduced · worse fails",
+        "FUNDAMENTAL · FCF yield ≥ {fcf_yield_min:.0%} OR FCF margin ≥ {fcf_margin_min:.0%} (TTM OCF − capex)",
+        "FUNDAMENTAL · D/E ≤ {de_max:g} OR net debt/EBITDA ≤ {nd_ebitda_max:g}",
+        "FUNDAMENTAL · Financials: FCF and leverage tests not applied (n/a, not 'missing')",
+        "FUNDAMENTAL · PEG (fwd P/E ÷ fwd growth) ranks only; >{peg_max:g} is a warning; not computed on negative/near-zero EPS",
+        "FUNDAMENTAL · Up to {max_unavailable} metric groups may be unavailable; every available minimum must pass",
+        "EXCLUDE · Earnings within {earn_exclude} days · flag 8–{earn_elevated} days (elevated) and "
+        "{earn_elevated}–{earn_event} days (event risk)",
+        "EXCLUDE · Gap-down ≥ {gap_down:.0%} on ≥ {gap_vol_excl:g}× prior 20-day volume in {gap_lookback} sessions · "
+        "{gap_vol_review:g}–{gap_vol_excl:g}× → manual review",
+        "EXCLUDE · Confirmed guidance cut (not available on free data — never evaluated)",
+        "WARN (−{warn_penalty:g} pts each) · EPS estimates cut ≥5% in 30 days · decelerating sales · operating margin down ≥{op_margin_drop_pts:g} pt",
+    ]
+    trigger = ("Four independent triggers, shown separately. A: RSI(2) < {rsi2_trigger} yesterday and close > "
+               "yesterday's high. B: close reclaims the 10 EMA and closes up. C: a low within {sma200_touch_atr:g} ATR "
+               "of the 200 SMA in the prior 5 sessions, then close > yesterday's high and > 200 SMA. D: green close "
+               "above yesterday's high on ≥ {vol_trigger:g}× 20-day volume. Strength: A+D (15) › C+D (13) › A or C "
+               "(11) › B (8) › D alone (5). A trigger alone is not a buy: risk and fundamentals must pass too. "
+               "Entry = next session's open (the card estimates it with today's close).")
+    score_parts = [
+        "FUNDAMENTAL 40: ROIC 8 · sales 6 · EPS 6 · PEG 5 · FCF 5 · gross-margin trend 4 · leverage 3 · "
+        "EPS revisions 3 — progressive (acceptable 40% · good 70% · excellent 100%), normalized over available metrics",
+        "TECHNICAL 40: trigger strength 15 · pullback depth 7 (peak at 20% off high) · 200 SMA proximity in ATRs 5 · "
+        "price structure (higher low) 5 · reversal candle 4 · bullish volume 4",
+        "MARKET 20: RS vs SPY 10 · RS vs sector ETF 6 (20/60-day blend, Russell 1000 percentile) · regime 4",
+        "Bands: ≥{class_highest} highest priority · {class_strong}–{class_highest} strong · {class_watch}–{class_strong} "
+        "watchlist · below pass. Initial thresholds, not validated. A high score never overrides an exclusion.",
+    ]
+    best_when = "Broad pullbacks that drag quality growers down with the market"
+    fails_when = "Company-specific re-ratings — estimate cuts and heavy-volume gaps are screened out or flagged"
+    data = ("Daily OHLCV + fundamentals (Yahoo statements & consensus; Finnhub fallbacks), cached 7 days. "
+            "Not point-in-time. Revenue-estimate and guidance revisions unavailable.")
+    changed = "2026-11-05"
 
-    def prefilter(self, d, symbol, ctx):
-        p, r = self.params, d.iloc[-1]
-        if len(d) < 210 or not ok(r.hi252, r.sma50, r.sma200):
-            return False
-        off = 1 - r.close / r.hi252
-        return p["off_high_min"] <= off <= p["off_high_max"] and r.sma200 < r.close < r.sma50
+    def evaluate(self, d, symbol, ctx):            # not used: full_report strategies go through report()
+        return None
 
-    def evaluate(self, d, symbol, ctx):
-        p, r = self.params, d.iloc[-1]
-        f = (ctx.get("fundamentals") or {}).get(symbol)
-        if not f or not ok(r.atr, r.ema10, r.vol50):
-            return None
+    def report(self, frames, universe, ctx, settings, lookups, earnings_lookup, today):
+        res = qd2.run_screen(frames, universe, ctx, lookups.get("fundamentals") or (lambda s: {}),
+                             earnings_lookup, today, self.params)
+        res["cards"] = {c: [self.card(r, i) for i, r in enumerate(
+            [x for x in res["rows"] if x["classification"] == c], 1)]
+            for c in ("Highest priority", "Strong", "Watchlist", "Pass", "Setting up", "Triggered — unacceptable risk")}
+        return res
 
-        # ── "why it dipped": large gap-down on heavy volume
-        w = d.iloc[-p["gap_lookback"]:]
-        gaps = (w.open / d.close.shift(1).loc[w.index] - 1)
-        heavy = w.volume >= p["gap_vol_mult"] * w.vol50
-        gap_hit = bool(((gaps <= -p["gap_down"]) & heavy).any())
-        if gap_hit and p["exclude_gap"]:
-            return None
-
-        # ── fundamentals: (label, passed or None if missing, display)
-        g = f.get("fwd_eps_growth")
-        peg_lim = p["peg_max_fast"] if (g is not None and g >= p["fast_growth"]) else p["peg_max"]
-        fcf_y, fcf_m = f.get("fcf_yield"), f.get("fcf_margin")
-        de, nde = f.get("de"), f.get("nd_ebitda")
-
-        gmd, peg = f.get("gm_delta_pts"), f.get("peg")
-        gmd_s = "n/a" if gmd is None else f"{gmd:+.1f} pt"
-        peg_s = "n/a" if peg is None else f"{peg:.2f}"
-        de_s = "n/a" if de is None else f"{de:.2f}"
-        nde_s = "n/a" if nde is None else f"{nde:.1f}"
-
-        def either(a, b):
-            vals = [v for v in (a, b) if v is not None]
-            return None if not vals else any(vals)
-
-        checks = [
-            ("ROIC", None if f.get("roic") is None else f["roic"] >= p["roic_min"],
-             f"{f.get('roic_src') or 'ROIC'} {_pct(f.get('roic'))}"),
-            ("Gross margin", None if gmd is None else gmd >= -p["gm_drop_max_pts"],
-             f"Gross margin {_pct(f.get('gm'))} ({gmd_s} {f.get('gm_src') or ''})".replace(" )", ")")),
-            ("FCF", either(None if fcf_y is None else fcf_y >= p["fcf_yield_min"],
-                           None if fcf_m is None else fcf_m >= p["fcf_margin_min"]),
-             f"FCF yield {_pct(fcf_y, 1)} · FCF margin {_pct(fcf_m)}"),
-            ("Leverage", either(None if de is None else 0 <= de <= p["de_max"],
-                                None if nde is None else nde <= p["nd_ebitda_max"]),
-             f"D/E {de_s} · net debt/EBITDA {nde_s}"),
-            ("Sales growth", None if f.get("sales_growth") is None else f["sales_growth"] >= p["sales_growth_min"],
-             f"Sales {_pct(f.get('sales_growth'))} ({f.get('sales_growth_src') or 'n/a'})"),
-            ("Fwd EPS growth", None if g is None else g >= p["fwd_eps_growth_min"], f"Fwd EPS growth {_pct(g)}"),
-            ("PEG", None if peg is None else peg <= peg_lim, f"PEG {peg_s} (max {peg_lim:g})"),
-        ]
-        if any(c[1] is False for c in checks):
-            return None
-        missing = [c[0] for c in checks if c[1] is None]
-        if len(missing) > p["max_missing"]:
-            return None
-
-        # ── timing trigger
-        prev = d.iloc[-2]
-        t_rsi = ok(prev.rsi2) and prev.rsi2 < p["rsi2_trigger"] and r.close > prev.high
-        t_ema = r.close > r.ema10 and prev.close <= prev.ema10
-        t_200 = bool(((d.low.iloc[-5:] - d.sma200.iloc[-5:]).abs() <= p["sma200_touch_atr"] * r.atr).any()) \
-            and r.close > prev.high
-        ready = bool(t_rsi or t_ema or t_200)
-        fired = [n for n, v in (("RSI(2) turn", t_rsi), ("10 EMA reclaim", t_ema), ("200 SMA higher low", t_200)) if v]
-
-        # ── score
-        z = lambda v: 0 if v is None else v
-        fund = (10 * scale(z(f.get("roic")), 0.15, 0.35) + 10 * scale(z(f.get("sales_growth")), 0.15, 0.40)
-                + 8 * scale(z(g), 0.15, 0.40) + 8 * scale(f.get("peg") if f.get("peg") is not None else 9, 1.5, 0.8)
-                + 7 * scale(z(fcf_y), 0.02, 0.06)
-                + 4 * (scale(f["gm_delta_pts"], -1, 2) if f.get("gm_delta_pts") is not None else 0)
-                + 3 * (scale(de, 0.8, 0) if de is not None and de >= 0 else scale(z(nde), 2, -1)))
-        off = 1 - r.close / r.hi252
-        rs = ctx.get("rs_pct", {}).get(symbol, 50)
-        prox200 = (r.close - r.sma200) / r.atr
-        entry_sc = (20 * ready + 10 * scale(rs, 30, 90) + 10 * (1 - min(abs(off - 0.20) / 0.10, 1))
-                    + 10 * scale(prox200, 6, 0.5))
-        score = fund + entry_sc
-
-        stop = d.low.iloc[-10:].min()
-        notes = [c[2] + ("" if c[1] is not False else " ✗") for c in checks]
-        notes += [f"{off * 100:.0f}% off 52-week high", f"{prox200:.1f} ATR above the 200 SMA",
-                  f"RS {rs:.0f}th pct",
-                  ("Trigger: " + ", ".join(fired)) if ready else
-                  f"No trigger yet — watch for a close above {max(prev.high, r.high):,.2f} or the 10 EMA ({r.ema10:,.2f})"]
-        if missing:
-            notes.append("Unavailable: " + ", ".join(missing))
-        if gap_hit:
-            notes.append("⚠ Recent gap-down on heavy volume")
-        return Setup(
-            score=score,
-            entry=r.high if ready else max(r.high, r.ema10),
-            entry_note="Buy-stop above today's high" if ready else "Not ready — alert above today's high / 10 EMA",
-            stop_structure=stop, stop_note="Below the 10-day low",
-            notes=notes, target_hint=r.sma50, target_note="Reclaim of 50 SMA",
-            tags=["Ready" if ready else "Setting up"],
+    @staticmethod
+    def card(r: dict, rank: int) -> dict:
+        rp, fe = r["risk"], r["fund_eval"]
+        fs, ts, ms = r["fund_score"], r["tech_score"], r["mkt_score"]
+        trig = [n for n, k in (("A RSI(2)", "trig_a"), ("B 10 EMA", "trig_b"), ("C 200 SMA", "trig_c"),
+                               ("D volume", "trig_d")) if r[k]]
+        notes = [f"Scores — fundamental {fs['score']:.1f}/40 · technical {ts['score']:.1f}/40 · market {ms['score']:.1f}/20 "
+                 f"· coverage {r['coverage'] * 100:.0f}% · confidence {r['confidence']}",
+                 "Triggers fired: " + (", ".join(trig) if trig else "none")]
+        notes += [f"{g}: {fe['display'][g]}" + (" ✗" if fe["status"][g] == "fail" else "") for g in qd2.GROUPS]
+        f = r["fund"]
+        notes.append(f"PEG {f.get('peg'):.2f}" if f.get("peg") is not None else f"PEG n/a ({f.get('peg_note') or 'unavailable'})")
+        notes.append(f"EPS revisions 30d: {_pc(f.get('eps_rev_30d'), 1)}")
+        notes.append(f"RS vs SPY {r['rs_spy_pct'] or 0:.0f}th pct · vs sector "
+                     + ("n/a" if r["rs_sector_pct"] is None else f"{r['rs_sector_pct']:.0f}th pct"))
+        notes += ["⚠ " + w for w in r["warnings"]] + ["🔎 " + v for v in r["review"]]
+        notes += [x for x in rp.get("flags", [])] + ["ℹ " + i for i in r["info"]]
+        tags = [r["classification"]] + ([r["trig_label"]] if r["trig_label"] else []) + [f"conf. {r['confidence']}"]
+        extra = [f"Stop distance <b>{rp['atr_stop_dist']:.2f} ATR</b> ({rp['atr_flag']}) · "
+                 f"2R <b>{(rp.get('t2') or 0):,.2f}</b> (+{(rp.get('ret2_pct') or 0):.1f}%) · "
+                 f"3R +{(rp.get('ret3_pct') or 0):.1f}%"]
+        if rp.get("resistance") and rp["resistance"] < (rp.get("t3") or 0):
+            extra.append(f"Resistance {rp['resistance_name']} <b>{rp['resistance']:,.2f}</b> "
+                         f"→ {rp['avail_R']:.1f}R available")
+        if r.get("earnings_flag"):
+            extra.append("⚠ " + r["earnings_flag"])
+        return dict(
+            rank=rank, symbol=r["symbol"], name=r.get("name", ""), sector=r.get("sector") or "",
+            sector_etf="", sector_state="—", sector_rs21=float("nan"), vs_sector21=float("nan"),
+            score=round(r["total"], 1), price=r["close"], chg1=r.get("chg1") or 0.0, atr=r["atr"],
+            entry=rp["entry"], entry_note="next session's open (estimated from today's close)",
+            stop_structure=rp["stop"], stop_note="10-day low − 0.1 ATR",
+            stop_atr=float("nan"), atr_mult=None,
+            risk_struct_pct=rp.get("risk_pct") or float("nan"), risk_atr_pct=float("nan"),
+            target_r=3.0, target=rp.get("t3") or float("nan"), target_hint=None, target_note="",
+            hold_min=P["hold_min"], hold_max=P["hold_max"], time_stop=r["time_stop"], earn_in_hold=r["earn_in_hold"],
+            notes=notes, tags=tags, rs_pct=r.get("rs_spy_pct"), earnings=r["earnings"],
+            earnings_status="date" if r["earnings"] else r["earnings_status"], bar_date=r["bar_date"],
+            extra=extra, classification=r["classification"],
         )
